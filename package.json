@@ -1,0 +1,41 @@
+{
+  "name": "jlc-openapi-cli",
+  "version": "0.1.0",
+  "description": "嘉立创开放平台命令行工具（JLC OpenAPI CLI）",
+  "author": "xiongrucheng",
+  "keywords": [
+    "jlc",
+    "jlcpcb",
+    "openapi",
+    "cli",
+    "嘉立创"
+  ],
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "bin": {
+    "jlc-openapi-cli": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.17"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
