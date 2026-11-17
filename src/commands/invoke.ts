@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { getBooleanFlag, hasFlag, type Flags } from "../args";
+import { getBooleanFlag, getStringFlag, hasFlag, type Flags } from "../args";
 import { loadConfig, validateEndpoint } from "../config";
-import { extractEndpointFlags, getEndpoint, validatePayload } from "../endpoints";
+import { findSimilarPaths, getEndpoint, type EndpointDef } from "../endpoints";
 import { requestHttp, type FetchLike } from "../http";
 import { formatJsonText } from "../json-text";
 import {
@@ -15,6 +15,7 @@ import {
   writeOut,
   type WritableLike,
 } from "../output";
+import { buildPayload, RawNumber, stringifyPayload, toQueryString } from "../payload";
 import { buildAuthorization, buildStringToSign, computeSignature, createNonce } from "../sign";
 import { getVersion } from "../version";
 
@@ -32,10 +33,9 @@ export interface InvokeDeps {
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 function stringValue(flags: Flags, name: string): string | undefined {
-  const value = flags[name];
-  if (value === undefined) return undefined;
-  if (value === true) usageError(`参数 --${name} 缺少值`);
-  return value as string;
+  const value = getStringFlag(flags, name);
+  if (value === "") usageError(`参数 --${name} 缺少值`);
+  return value;
 }
 
 function parseTimeout(flags: Flags): number {
@@ -79,26 +79,71 @@ function readJsonBody(flags: Flags, cwd: string): string | undefined {
   return normalized;
 }
 
-function buildQuery(payload: Record<string, unknown>): string {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(payload)) {
-    if (value === undefined || value === null) continue;
-    params.append(key, String(value));
-  }
-  return params.toString();
-}
-
 function splitPath(apiPath: string): { path: string; query: string } {
   const index = apiPath.indexOf("?");
   if (index < 0) return { path: apiPath, query: "" };
   return { path: apiPath.slice(0, index), query: apiPath.slice(index + 1) };
 }
 
+function hasBusinessFieldFlags(flags: Flags, allowed: readonly string[]): boolean {
+  const ignore = new Set([
+    "config",
+    "endpoint",
+    "raw",
+    "compact",
+    "debug",
+    "timeout",
+    "method",
+    "strict",
+    "noValidate",
+    "json",
+    "jsonFile",
+    "file",
+    "signBody",
+    ...allowed,
+  ]);
+  return Object.keys(flags).some((key) => !ignore.has(key));
+}
+
 interface PreparedRequest {
   method: string;
   apiPath: string;
-  body: string;
+  contentType: "json" | "multipart";
+  body: string | FormData;
   query: string;
+  signBody: string;
+}
+
+function appendFormValue(form: FormData, key: string, value: unknown): void {
+  if (value === undefined || value === null) return;
+  if (Array.isArray(value)) {
+    for (const item of value) appendFormValue(form, key, item);
+    return;
+  }
+  if (value instanceof RawNumber) {
+    form.append(key, value.raw);
+    return;
+  }
+  if (typeof value === "object") {
+    form.append(key, stringifyPayload(value));
+    return;
+  }
+  form.append(key, String(value));
+}
+
+function buildFormData(
+  payload: Record<string, unknown>,
+  fileValues: Record<string, string>,
+): FormData {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(payload)) {
+    appendFormValue(form, key, value);
+  }
+  for (const [field, filePath] of Object.entries(fileValues)) {
+    const buffer = fs.readFileSync(filePath);
+    form.append(field, new Blob([buffer]), path.basename(filePath));
+  }
+  return form;
 }
 
 function prepareRegistered(
@@ -109,33 +154,122 @@ function prepareRegistered(
 ): PreparedRequest {
   const def = getEndpoint(apiPath);
   if (!def) {
+    const similar = findSimilarPaths(apiPath);
     usageError(
-      `未注册的接口：${apiPath}。可使用 \`jlc-openapi-cli list\` 查看，` +
+      `未注册的接口：${apiPath}。` +
+        (similar.length > 0 ? `相近接口：${similar.join(", ")}。` : "") +
+        `可使用 \`jlc-openapi-cli list --search <关键词>\` 查找，` +
         `或用 \`jlc-openapi-cli call ${apiPath} --json '<body>'\` 通用调用。`,
     );
   }
+
   const rawBody = readJsonBody(flags, cwd);
-  const fieldFlags = extractEndpointFlags(flags);
+  const strict = getBooleanFlag(flags, "strict") || def.strict;
+  const validate = !getBooleanFlag(flags, "noValidate");
+  const warn = (message: string): void => writeErr(stderr, `警告：${message}`);
 
   if (rawBody !== undefined) {
-    if (Object.keys(fieldFlags).length > 0) {
-      usageError("--json / --json-file 不能与逐字段参数同时使用");
+    if (def.contentType === "json") {
+      if (hasBusinessFieldFlags(flags, [])) {
+        usageError("--json / --json-file 不能与逐字段参数同时使用");
+      }
+      if (def.method === "GET") {
+        const parsed = JSON.parse(rawBody) as unknown;
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+          usageError("GET 请求的 --json 必须是 JSON 对象");
+        }
+        return {
+          method: "GET",
+          apiPath: def.path,
+          contentType: "json",
+          body: "",
+          query: toQueryString(parsed).join("&"),
+          signBody: "",
+        };
+      }
+      return {
+        method: "POST",
+        apiPath: def.path,
+        contentType: "json",
+        body: rawBody,
+        query: "",
+        signBody: rawBody,
+      };
     }
+
+    // multipart + --json：JSON 只表示非文件表单字段，仍可使用 --file。
+    if (hasBusinessFieldFlags(flags, def.fileFields ?? [])) {
+      usageError("multipart 接口使用 --json 时，只能再配合文件字段参数");
+    }
+    const parsed = JSON.parse(rawBody) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      usageError("multipart 接口的 --json 必须是 JSON 对象");
+    }
+    const payload = parsed as Record<string, unknown>;
+    const fileValues: Record<string, string> = {};
+    for (const [index, fileField] of (def.fileFields ?? []).entries()) {
+      let raw = flags[fileField];
+      if (raw === undefined && index === 0) raw = flags.file;
+      if (raw === undefined) continue;
+      if (typeof raw !== "string") usageError(`参数 --${fileField} 缺少文件路径`);
+      const absolute = path.resolve(cwd, raw);
+      if (!fs.existsSync(absolute) || !fs.statSync(absolute).isFile()) {
+        usageError(`文件不存在：${absolute}`);
+      }
+      fileValues[fileField] = absolute;
+    }
+    const meta =
+      typeof payload.meta === "string"
+        ? payload.meta
+        : payload.meta !== undefined
+          ? stringifyPayload(payload.meta)
+          : Object.keys(payload).length > 0
+            ? stringifyPayload(payload)
+            : "{}";
+    if (payload.meta === undefined) payload.meta = meta;
     return {
-      method: def.method,
+      method: "POST",
       apiPath: def.path,
-      body: def.method === "GET" ? "" : rawBody,
-      query: def.method === "GET" ? buildQuery(JSON.parse(rawBody) as Record<string, unknown>) : "",
+      contentType: "multipart",
+      body: buildFormData(payload, fileValues),
+      query: "",
+      signBody: meta,
     };
   }
 
-  const { payload, warnings } = validatePayload(def, fieldFlags);
-  for (const warning of warnings) writeErr(stderr, `警告：${warning}`);
+  const built = buildPayload(def, flags, { strict, validate, warn });
 
   if (def.method === "GET") {
-    return { method: "GET", apiPath: def.path, body: "", query: buildQuery(payload) };
+    return {
+      method: "GET",
+      apiPath: def.path,
+      contentType: "json",
+      body: "",
+      query: toQueryString(built.payload).join("&"),
+      signBody: "",
+    };
   }
-  return { method: "POST", apiPath: def.path, body: JSON.stringify(payload), query: "" };
+
+  if (def.contentType === "multipart") {
+    return {
+      method: "POST",
+      apiPath: def.path,
+      contentType: "multipart",
+      body: buildFormData(built.payload, built.fileValues),
+      query: "",
+      signBody: built.signBody,
+    };
+  }
+
+  const body = stringifyPayload(built.payload);
+  return {
+    method: "POST",
+    apiPath: def.path,
+    contentType: "json",
+    body,
+    query: "",
+    signBody: body,
+  };
 }
 
 function prepareGeneric(
@@ -143,14 +277,6 @@ function prepareGeneric(
   flags: Flags,
   cwd: string,
 ): PreparedRequest {
-  const leftover = Object.keys(extractEndpointFlags(flags));
-  if (leftover.length > 0) {
-    usageError(
-      `call 不接受逐字段参数（${leftover.map((key) => `--${key}`).join(", ")}）。` +
-        `请使用 --json '<body>' 或 --json-file <path>。`,
-    );
-  }
-
   const method = (stringValue(flags, "method") ?? "POST").toUpperCase();
   if (method !== "POST" && method !== "GET") {
     usageError(`参数 --method 只支持 POST 或 GET，实际为 "${method}"`);
@@ -164,17 +290,27 @@ function prepareGeneric(
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
       usageError("GET 请求的 --json 必须是 JSON 对象");
     }
-    const query = [pathQuery, buildQuery(parsed as Record<string, unknown>)]
+    const query = [pathQuery, toQueryString(parsed).join("&")]
       .filter((part) => part !== "")
       .join("&");
-    return { method: "GET", apiPath: barePath, body: "", query };
+    return {
+      method: "GET",
+      apiPath: barePath,
+      contentType: "json",
+      body: "",
+      query,
+      signBody: "",
+    };
   }
 
+  const body = rawBody ?? "{}";
   return {
     method: "POST",
     apiPath: barePath,
-    body: rawBody ?? "{}",
+    contentType: "json",
+    body,
     query: pathQuery,
+    signBody: body,
   };
 }
 
@@ -225,7 +361,7 @@ async function execute(
 
   if (raw && compact) usageError("--raw 与 --compact 不能同时使用");
 
-  const allowHttp = flags.allowHttp === true;
+  const allowHttp = getBooleanFlag(flags, "allowHttp");
   const config = loadConfig({
     configPath: stringValue(flags, "config"),
     cwd,
@@ -256,7 +392,7 @@ async function execute(
     canonicalUri,
     timestamp,
     nonce,
-    body: prepared.body,
+    body: prepared.signBody,
   });
   const signature = computeSignature(config.sk, stringToSign);
   const authorization = buildAuthorization({
@@ -269,16 +405,24 @@ async function execute(
 
   const headers: Record<string, string> = {
     Authorization: authorization,
-    "Content-Type": "application/json",
     Accept: "application/json",
     "User-Agent": `jlc-openapi-cli/${getVersion()}`,
   };
+  if (prepared.contentType === "json") {
+    headers["Content-Type"] = "application/json";
+  }
 
   if (debug) {
     writeErr(stderr, `[debug] ${prepared.method} ${url}`);
     writeErr(stderr, `[debug] stringToSign=${JSON.stringify(stringToSign)}`);
     writeErr(stderr, `[debug] Authorization=${authorization}`);
-    writeErr(stderr, `[debug] body=${JSON.stringify(prepared.body)}`);
+    if (typeof prepared.body === "string") {
+      writeErr(stderr, `[debug] body=${JSON.stringify(prepared.body)}`);
+    } else {
+      const keys: string[] = [];
+      prepared.body.forEach((_value, key) => keys.push(key));
+      writeErr(stderr, `[debug] multipart fields=${JSON.stringify(keys)}`);
+    }
   }
 
   const response = await requestHttp({
@@ -291,12 +435,10 @@ async function execute(
   });
 
   if (response.status < 200 || response.status >= 300) {
-    throw new CliError(
-      "http",
-      `HTTP ${response.status}`,
-      EXIT_NETWORK,
-      { status: response.status, body: response.text.slice(0, 4000) },
-    );
+    throw new CliError("http", `HTTP ${response.status}`, EXIT_NETWORK, {
+      status: response.status,
+      body: response.text.slice(0, 4000),
+    });
   }
 
   const text = response.text;
@@ -357,4 +499,4 @@ export async function runCall(
   return execute(prepared, flags, deps);
 }
 
-export type { FetchLike };
+export type { EndpointDef, FetchLike };

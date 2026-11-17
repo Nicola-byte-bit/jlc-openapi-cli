@@ -1,95 +1,8 @@
-import type { Flags } from "./args";
-import { usageError } from "./output";
+import { GENERATED_ENDPOINTS } from "./endpoints.generated";
+import { BUILTIN_ENDPOINTS, OVERRIDES, type EndpointOverride } from "./endpoints.overrides";
+import type { EndpointDef, FieldDef } from "./types";
 
-export interface FieldDef {
-  name: string;
-  type: "string" | "integer" | "boolean";
-  required: boolean;
-  description: string;
-  enum?: string[];
-  min?: number;
-  max?: number;
-  /** 目前仅支持 `datetime`（`yyyy-MM-dd HH:mm:ss`）。 */
-  format?: "datetime";
-}
-
-export interface EndpointDef {
-  path: string;
-  description: string;
-  method: "POST" | "GET";
-  fields: FieldDef[];
-  example: string;
-}
-
-export const DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
-
-export const ENDPOINTS: Record<string, EndpointDef> = {
-  "/pcb/order/getOrderPageList": {
-    path: "/pcb/order/getOrderPageList",
-    description: "分页查询 PCB 订单",
-    method: "POST",
-    fields: [
-      {
-        name: "orderType",
-        type: "string",
-        required: true,
-        enum: ["examples", "batch"],
-        description: "订单类别：样板 examples，小批量 batch",
-      },
-      {
-        name: "produceCode",
-        type: "string",
-        required: false,
-        description: "生产订单编号，例如 Y50504",
-      },
-      {
-        name: "orderByFlag",
-        type: "boolean",
-        required: false,
-        description: "是否按下单时间降序排序：true 降序，false 升序",
-      },
-      {
-        name: "orderDateBegin",
-        type: "string",
-        required: true,
-        format: "datetime",
-        description: "下单开始时间，格式 yyyy-MM-dd HH:mm:ss",
-      },
-      {
-        name: "orderDateEnd",
-        type: "string",
-        required: true,
-        format: "datetime",
-        description: "下单结束时间，格式 yyyy-MM-dd HH:mm:ss",
-      },
-      {
-        name: "pageSize",
-        type: "integer",
-        required: true,
-        min: 1,
-        max: 100,
-        description: "每页数据量，1-100",
-      },
-      {
-        name: "pageNum",
-        type: "integer",
-        required: true,
-        min: 1,
-        description: "页码，从 1 开始",
-      },
-      {
-        name: "queryFilterFlag",
-        type: "boolean",
-        required: false,
-        description: "是否过滤已取消订单：true 过滤，false 不过滤",
-      },
-    ],
-    example:
-      'jlc-openapi-cli /pcb/order/getOrderPageList --orderType examples --produceCode Y50504 ' +
-      '--orderByFlag true --orderDateBegin "2026-11-11 00:00:00" --orderDateEnd "2026-11-16 18:00:00" ' +
-      "--pageSize 10 --pageNum 1 --queryFilterFlag true",
-  },
-};
+export type { EndpointDef, FieldDef } from "./types";
 
 /** 调用接口时不应被当作业务字段的全局选项。 */
 export const GLOBAL_FLAG_NAMES = new Set([
@@ -106,143 +19,123 @@ export const GLOBAL_FLAG_NAMES = new Set([
   "allowHttp",
   "help",
   "version",
+  "strict",
+  "noValidate",
+  "summary",
+  "category",
+  "search",
+  "detail",
+  "limit",
+  "file",
+  "signBody",
 ]);
+
+function isRemovedPath(candidate: string, removed: readonly string[]): boolean {
+  return removed.some((path) => candidate === path || candidate.startsWith(`${path}.`));
+}
+
+function mergeFields(
+  base: FieldDef[],
+  override: EndpointOverride,
+): FieldDef[] {
+  const removed = override.removeFields ?? [];
+  if (override.replaceFields) {
+    return (override.fields ?? []).filter((item) => !isRemovedPath(item.path, removed));
+  }
+
+  const overridePaths = new Set((override.fields ?? []).map((item) => item.path));
+  const merged = base.filter(
+    (item) => !isRemovedPath(item.path, removed) && !overridePaths.has(item.path),
+  );
+  merged.push(...(override.fields ?? []).filter((item) => !isRemovedPath(item.path, removed)));
+  return merged;
+}
+
+function mergeEndpoint(base: EndpointDef, override: EndpointOverride): EndpointDef {
+  const { fields, replaceFields, removeFields, ...rest } = override;
+  const merged: EndpointDef = {
+    ...base,
+    ...rest,
+    fields: mergeFields(base.fields, override),
+  };
+  return merged;
+}
+
+function createFromOverride(path: string, override: EndpointOverride): EndpointDef {
+  return {
+    path,
+    method: override.method ?? "POST",
+    title: override.title ?? path,
+    category: override.category ?? "未分类",
+    description: override.description ?? "",
+    contentType: override.contentType ?? "json",
+    ...(override.fileFields ? { fileFields: override.fileFields } : {}),
+    fields: override.fields ?? [],
+    strict: override.strict ?? false,
+    ...(override.legacy ? { legacy: true } : {}),
+    ...(override.example ? { example: override.example } : {}),
+  };
+}
+
+function buildRegistry(): Record<string, EndpointDef> {
+  const registry: Record<string, EndpointDef> = {};
+
+  for (const endpoint of [...BUILTIN_ENDPOINTS, ...GENERATED_ENDPOINTS]) {
+    if (registry[endpoint.path]) {
+      throw new Error(`接口路径重复：${endpoint.path}`);
+    }
+    registry[endpoint.path] = endpoint;
+  }
+
+  for (const [path, override] of Object.entries(OVERRIDES)) {
+    const base = registry[path];
+    registry[path] = base ? mergeEndpoint(base, override) : createFromOverride(path, override);
+  }
+
+  return registry;
+}
+
+export const ENDPOINTS: Record<string, EndpointDef> = buildRegistry();
 
 export function getEndpoint(apiPath: string): EndpointDef | undefined {
   return ENDPOINTS[apiPath];
 }
 
-export function extractEndpointFlags(flags: Flags): Flags {
-  const result: Flags = {};
-  for (const [key, value] of Object.entries(flags)) {
-    if (!GLOBAL_FLAG_NAMES.has(key)) result[key] = value;
+export function allEndpoints(): EndpointDef[] {
+  return Object.values(ENDPOINTS);
+}
+
+/** 兼容 Git Bash / MSYS 把 `/pcb/...` 改写成本地路径的情况。 */
+export function matchEndpointPath(input: string): EndpointDef | undefined {
+  const direct = getEndpoint(input);
+  if (direct) return direct;
+
+  const normalized = input.startsWith("/") ? input : `/${input}`;
+  const normalizedMatch = getEndpoint(normalized);
+  if (normalizedMatch) return normalizedMatch;
+
+  for (const endpoint of allEndpoints()) {
+    if (input.endsWith(endpoint.path)) return endpoint;
   }
-  return result;
+  return undefined;
 }
 
-function parseBoolean(value: string, fieldName: string): boolean {
-  const normalized = value.trim().toLowerCase();
-  if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
-  if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
-  throw usageError(`参数 --${fieldName} 需要布尔值（true/false），实际为 "${value}"`);
-}
-
-function isValidDateTime(value: string): boolean {
-  if (!DATE_TIME_PATTERN.test(value)) return false;
-  const [datePart, timePart] = value.split(" ");
-  const [year, month, day] = (datePart as string).split("-").map(Number);
-  const [hour, minute, second] = (timePart as string).split(":").map(Number);
-  if (
-    month! < 1 || month! > 12 ||
-    day! < 1 || day! > 31 ||
-    hour! < 0 || hour! > 23 ||
-    minute! < 0 || minute! > 59 ||
-    second! < 0 || second! > 59
-  ) {
-    return false;
-  }
-  const date = new Date(year!, month! - 1, day!, hour!, minute!, second!);
-  return (
-    date.getFullYear() === year &&
-    date.getMonth() === month! - 1 &&
-    date.getDate() === day
-  );
-}
-
-export interface ValidationResult {
-  payload: Record<string, unknown>;
-  warnings: string[];
-}
-
-/**
- * 把命令行 flag 转成接口 body，并校验必填、枚举、日期格式与数值范围。
- * 未提供的可选字段不会出现在 payload 中。
- */
-export function validatePayload(endpoint: EndpointDef, raw: Flags): ValidationResult {
-  const errors: string[] = [];
-  const fieldNames = new Set(endpoint.fields.map((field) => field.name));
-
-  for (const key of Object.keys(raw)) {
-    if (!fieldNames.has(key)) {
-      errors.push(
-        `未知参数 --${key}。可用参数：${endpoint.fields.map((field) => field.name).join(", ")}`,
+/** 未命中时给出相近路径，便于纠正拼写。 */
+export function findSimilarPaths(input: string, limit = 5): string[] {
+  const needle = input.toLowerCase();
+  return allEndpoints()
+    .map((endpoint) => endpoint.path)
+    .filter((path) => {
+      const lower = path.toLowerCase();
+      return (
+        lower.includes(needle) ||
+        needle.includes(lower) ||
+        lower.split("/").some((segment) => segment !== "" && needle.includes(segment))
       );
-    }
-  }
+    })
+    .slice(0, limit);
+}
 
-  const payload: Record<string, unknown> = {};
-  for (const field of endpoint.fields) {
-    const value = raw[field.name];
-    if (value === undefined) {
-      if (field.required) errors.push(`缺少必填参数 --${field.name}`);
-      continue;
-    }
-
-    if (field.type === "boolean") {
-      if (value === true) {
-        payload[field.name] = true;
-        continue;
-      }
-      try {
-        payload[field.name] = parseBoolean(String(value), field.name);
-      } catch (error) {
-        errors.push((error as Error).message);
-      }
-      continue;
-    }
-
-    if (typeof value !== "string") {
-      errors.push(`参数 --${field.name} 缺少值`);
-      continue;
-    }
-
-    if (field.type === "integer") {
-      const num = Number(value);
-      if (!Number.isInteger(num)) {
-        errors.push(`参数 --${field.name} 需要整数，实际为 "${value}"`);
-        continue;
-      }
-      if (field.min !== undefined && num < field.min) {
-        errors.push(`参数 --${field.name} 不能小于 ${field.min}`);
-        continue;
-      }
-      if (field.max !== undefined && num > field.max) {
-        errors.push(`参数 --${field.name} 不能大于 ${field.max}`);
-        continue;
-      }
-      payload[field.name] = num;
-      continue;
-    }
-
-    if (field.enum && !field.enum.includes(value)) {
-      errors.push(`参数 --${field.name} 只能是 ${field.enum.join(" / ")}，实际为 "${value}"`);
-      continue;
-    }
-    if (field.format === "datetime" && !isValidDateTime(value)) {
-      errors.push(
-        `参数 --${field.name} 需要格式为 "yyyy-MM-dd HH:mm:ss" 的合法时间，实际为 "${value}"`,
-      );
-      continue;
-    }
-
-    payload[field.name] = value;
-  }
-
-  if (errors.length > 0) {
-    throw usageError(errors.join("；"));
-  }
-
-  const warnings: string[] = [];
-  const begin = payload.orderDateBegin;
-  const end = payload.orderDateEnd;
-  if (typeof begin === "string" && typeof end === "string") {
-    const beginTime = Date.parse(begin.replace(" ", "T"));
-    const endTime = Date.parse(end.replace(" ", "T"));
-    const days = Math.abs(endTime - beginTime) / 86_400_000;
-    if (days > 365) {
-      warnings.push("orderDateBegin 与 orderDateEnd 相差超过 365 天，服务端可能拒绝该请求。");
-    }
-  }
-
-  return { payload, warnings };
+export function hasFileFields(endpoint: EndpointDef): boolean {
+  return endpoint.contentType === "multipart" && (endpoint.fileFields?.length ?? 0) > 0;
 }

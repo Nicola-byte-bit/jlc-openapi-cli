@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 
-import { getStringFlag, hasFlag, type Flags } from "../args";
+import { getBooleanFlag, getStringFlag, hasFlag, type Flags } from "../args";
 import {
   CONFIG_FILE_NAME,
   DEFAULT_ENDPOINT,
@@ -133,14 +133,14 @@ export async function runInit(flags: Flags, deps: InitDeps = {}): Promise<number
   const stdout = deps.stdout ?? process.stdout;
   const env = deps.env ?? process.env;
   const homeDir = deps.homeDir ?? os.homedir();
-  const allowHttp = flags.allowHttp === true;
+  const allowHttp = getBooleanFlag(flags, "allowHttp");
 
   const configPathFlag = flagOrUndefined(flags, "config");
   const target = configPathFlag
     ? path.resolve(configPathFlag)
     : homeConfigPath(homeDir);
 
-  if (fs.existsSync(target) && flags.force !== true) {
+  if (fs.existsSync(target) && !getBooleanFlag(flags, "force")) {
     if (!isInteractive(stdin)) {
       usageError(`配置文件已存在：${target}。如需覆盖请加 --force。`);
     }

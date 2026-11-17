@@ -10,7 +10,7 @@ export interface ResponseLike {
 export interface HttpRequestOptions {
   method: string;
   url: string;
-  body?: string;
+  body?: string | FormData;
   headers: Record<string, string>;
   timeoutMs: number;
   fetchImpl?: FetchLike;

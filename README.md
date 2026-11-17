@@ -56,13 +56,34 @@ jlc-openapi-cli init \
 4. 环境变量按字段覆盖：`JLC_OPENAPI_APP_ID`、`JLC_OPENAPI_ACCESS_KEY`、
    `JLC_OPENAPI_SECRET_KEY`、`JLC_OPENAPI_ENDPOINT`
 
+## 接口覆盖
+
+覆盖 `api-docs/` 中 6 大业务线的 110 个接口，并保留旧版
+`/pcb/order/getOrderPageList` 兼容接口，共 111 个：
+
+- PCB：在线计价、创建/返单、查询、物流、生产进度、价格明细
+- SMT：订单、物料、私有库、元器件邮寄
+- 3DP：模型上传、报价、提交/返单、问客、进度
+- 元器件 & MRO：BOM 搜索/配单、询价、立创商城商品/库存/订单
+- 嘉立创云 ERP：仓库、入库/出库、物料、项目、工时、采购/销售订单
+- CNC：插件使用记录
+
 ## 使用
 
 ```bash
-# 查看所有接口
-jlc-openapi-cli list
-jlc-openapi-cli list --json --compact
+# 按关键词找接口
+jlc-openapi-cli list --search 订单
 
+# 查看单个接口的参数
+jlc-openapi-cli list /pcb/order/create
+
+# 机器可读目录（不含字段）
+jlc-openapi-cli list --summary --json --compact
+```
+
+命令统一为 `jlc-openapi-cli <接口路径> <参数>`：
+
+```bash
 # 分页查询 PCB 订单
 jlc-openapi-cli /pcb/order/getOrderPageList \
   --orderType "examples" \
@@ -75,13 +96,33 @@ jlc-openapi-cli /pcb/order/getOrderPageList \
   --queryFilterFlag true
 ```
 
+### 嵌套对象、数组与上传
+
+```bash
+# 点号路径
+jlc-openapi-cli /pcb/order/create \
+  --orderTechnical.plateType 1 \
+  --orderTechnical.stencilLayer 2 \
+  --orderLinkMan.man "张三" --orderLinkMan.phone "13500000000"
+
+# 数组：重复 flag 或 JSON
+jlc-openapi-cli /lcsc/openapi/bom/search --querys smt --querys 未知
+jlc-openapi-cli /3dp-open/order/submitOrder \
+  --deliveryType 1 \
+  --modelPriceParamList '[{"modelAccessId":"m1","modelCount":1}]'
+
+# 文件上传（multipart）
+jlc-openapi-cli /3dp-open/order/uploadModelFile --file ./model.obj
+jlc-openapi-cli /lcsc/openapi/bom/submit --file ./bom.xlsx
+```
+
 响应以格式化 JSON 输出到 stdout。业务失败时退出码为 1，但服务端响应仍会输出，便于排查。
 
 ### 通用调用
 
 ```bash
-jlc-openapi-cli call /pcb/order/getOrderPageList --json '{"orderType":"examples",...}'
-jlc-openapi-cli call /some/other/path --json-file body.json --method POST
+jlc-openapi-cli call /some/path --json '<body>' --method POST
+jlc-openapi-cli call /some/path --json-file body.json --method POST
 ```
 
 ### 全局选项
@@ -91,6 +132,10 @@ jlc-openapi-cli call /some/other/path --json-file body.json --method POST
 | `--config <path>` | 指定配置文件 |
 | `--endpoint <url>` | 临时覆盖 endpoint |
 | `--json <body>` / `--json-file <path>` | 直接指定请求体（与逐字段参数互斥） |
+| `--file <path>` | 上传文件（multipart 接口） |
+| `--sign-body <json>` | 覆盖 multipart 的签名报文 |
+| `--strict` | 禁止未声明参数并启用必填校验 |
+| `--no-validate` | 跳过必填校验 |
 | `--raw` | 原样输出响应 |
 | `--compact` | 单行 JSON |
 | `--timeout <ms>` | 请求超时，默认 30000 |
@@ -116,10 +161,16 @@ Git Bash（MSYS）可能把 `/pcb/order/getOrderPageList` 改写成 `C:/Program 
 
 ```bash
 npm install
+npm run gen:endpoints   # 从 api-docs/ 重新生成接口注册表
+npm run gen:check       # 校验生成物是否最新
 npm run build
 npm test
 npm pack --dry-run
 ```
+
+`api-docs/` 存放 110 份接口文档；`src/endpoints.generated.ts` 由
+`scripts/gen-endpoints.mjs` 自动生成，请勿手工修改。重点接口的人工校正位于
+`src/endpoints.overrides.ts`。
 
 签名实现遵循嘉立创开放平台文档：
 

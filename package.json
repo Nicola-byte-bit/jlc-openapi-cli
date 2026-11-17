@@ -1,6 +1,6 @@
 {
   "name": "jlc-openapi-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "嘉立创开放平台命令行工具（JLC OpenAPI CLI）",
   "author": "xiongrucheng",
   "repository": {
@@ -36,10 +36,12 @@
     "access": "public"
   },
   "scripts": {
+    "gen:endpoints": "node scripts/gen-endpoints.mjs",
+    "gen:check": "node scripts/gen-endpoints.mjs --check",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
-    "prepublishOnly": "npm run build && npm test"
+    "prepublishOnly": "npm run gen:check && npm run build && npm test"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

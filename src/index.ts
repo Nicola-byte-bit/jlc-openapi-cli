@@ -2,7 +2,8 @@
 import { getBooleanFlag, parseArgs } from "./args";
 import { runInit } from "./commands/init";
 import { runCall, runInvoke } from "./commands/invoke";
-import { matchEndpointPath, runList } from "./commands/list";
+import { runList } from "./commands/list";
+import { matchEndpointPath } from "./endpoints";
 import {
   CliError,
   EXIT_INTERNAL,
@@ -91,7 +92,7 @@ async function main(argv: string[]): Promise<number> {
   }
 
   if (command === "list") {
-    return runList(flags);
+    return runList(flags, positionals[1]);
   }
 
   if (command === "call") {
