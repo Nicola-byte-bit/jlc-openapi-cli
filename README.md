@@ -2,7 +2,10 @@
 
 嘉立创开放平台命令行工具。封装了请求签名流程，可被 Claude Code、Codex 等智能体直接调用。
 
-完整安装、配置与 Claude Code 使用说明见仓库中的 `docs/安装与使用指南.md`。
+完整安装、配置与 Claude Code 使用说明见
+[安装与使用指南](docs/安装与使用指南.md)。
+
+仓库地址：<https://github.com/RuChengXiong/jlc-openapi-cli>
 
 ## 安装
 
@@ -14,11 +17,11 @@ npm install -g jlc-openapi-cli
 
 ## 安装 Skill（可选）
 
-仓库内置 `skills/jlc-openapi-cli`，仓库发布到 GitHub 后可通过
-[skills CLI](https://skills.sh) 安装给智能体（把 `<你的GitHub用户名>` 换成实际 owner）：
+仓库内置 `skills/jlc-openapi-cli`，可通过
+[skills CLI](https://skills.sh) 安装给智能体：
 
 ```bash
-npx skills add <你的GitHub用户名>/jlc-openapi-cli -y -g -a claude-code
+npx skills add RuChengXiong/jlc-openapi-cli -y -g -a claude-code
 ```
 
 `npx skills` 需要 Node.js >= 22.20。手动安装可把 `skills/jlc-openapi-cli/`
